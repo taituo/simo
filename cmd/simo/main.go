@@ -2,8 +2,9 @@
 //
 //	simo validate seed.yaml
 //	simo preview  seed.yaml [--for 1h] [--from 'day2 09:00']
-//	simo run      seed.yaml [--for 1h] [--format text|jsonl|syslog] [--out DIR]
+//	simo run      seed.yaml [--for 1h] [--format text|jsonl|syslog] [--out DIR | --db DIR]
 //	simo logs     DIR [--device NAME] [--level WARN] [--grep TEXT]
+//	simo stats    WORLD [--by event,level] [--step 1h]
 package main
 
 import (
@@ -28,11 +29,18 @@ const usageText = `simo - math-driven log, metric and event simulator
 Usage:
   simo validate SEED                  check a seed and lint it
   simo preview  SEED [flags]          simulate a short window and summarise it
-  simo run      SEED [flags]          generate data to stdout or a directory
-  simo logs     DIR  [flags]          render and filter records written by run --out
+  simo run      SEED [flags]          generate lines to stdout, files (--out) or a world (--db)
+  simo logs     DIR  [flags]          render and filter records from --out files or a world
+
+World commands (a directory built with run --db):
+  simo stats       WORLD [flags]      event counts by event, level, device, site or class
+  simo metrics     WORLD --device D   metric series for one device
+  simo devices     WORLD              list devices
+  simo materialize WORLD [flags]      store raw events for whole days
+  simo truth       WORLD              ground truth: scheduled faults (never show to agents under test)
   simo version
 
-Time flags (preview, run, logs):
+Time flags (preview, run, logs, stats, metrics, materialize):
   --from T    start of the window: "day2 09:15", "09:15" or an offset like 26h
   --to T      end of the window
   --for D     length of the window, e.g. 1h (preview defaults to 1h)
@@ -59,6 +67,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdRun(args[1:], stdout, stderr)
 	case "logs":
 		err = cmdLogs(args[1:], stdout, stderr)
+	case "stats":
+		err = cmdStats(args[1:], stdout, stderr)
+	case "metrics":
+		err = cmdMetrics(args[1:], stdout, stderr)
+	case "devices":
+		err = cmdDevices(args[1:], stdout, stderr)
+	case "materialize":
+		err = cmdMaterialize(args[1:], stdout, stderr)
+	case "truth":
+		err = cmdTruth(args[1:], stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintf(stdout, "simo %s (engine %s)\n", version, ir.EngineVersion)
 	case "help", "-h", "--help":

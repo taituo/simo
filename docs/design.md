@@ -391,7 +391,7 @@ Store the recipe, not the meal. Because every record is a pure function of the s
 2. Not materialized → load the nearest checkpoint, generate the window on GPU or CPU, filter, render. Optionally cache the result as materialized.
 3. An intervention invalidates cached windows of affected devices after its tick.
 
-**Core schema**
+**Core schema** (the implemented schema is in `internal/store/store.go`; it adds catalog tables and orders some keys for the queries it serves)
 
 ```sql
 CREATE TABLE worlds      (id INTEGER PRIMARY KEY, name TEXT, seed_yaml TEXT, master_seed INTEGER, engine_version TEXT, created INTEGER);
@@ -417,7 +417,7 @@ CREATE TABLE models      (id TEXT PRIMARY KEY, kind TEXT, version TEXT, trained_
 
 - One file per world per simulated day, joined with `ATTACH` for cross-day queries. Deleting old data is deleting a file, and each file has its own writer, so days write in parallel.
 - WAL mode, `synchronous=NORMAL`, prepared statements, 10,000 to 100,000 rows per transaction. Measure insert rates on your own disk before sizing anything.
-- Driver: `mattn/go-sqlite3` (cgo) if the GPU binding already needs cgo, otherwise `modernc.org/sqlite` (pure Go).
+- Driver: `mattn/go-sqlite3` (cgo) if the GPU binding already needs cgo, otherwise `modernc.org/sqlite` (pure Go). The implementation uses `mattn/go-sqlite3`.
 - For heavy analytics over billions of rows, export Parquet and query it with DuckDB; SQLite stays the operational store.
 
 ## CLI and MCP interface
@@ -692,6 +692,8 @@ The stationary-distribution check and the TCP fixture join phase 1's exit gate.
 ## Roadmap
 
 Build the CPU path first and add the GPU once there is a trusted reference to compare it with. Phase 3 already gives a usable tool: an LLM writes a seed, and agents read realistic logs over MCP.
+
+**Status (October 2026):** phases 1 and 2 are implemented; their exit gates are automated tests (see the README).
 
 | Phase | What gets built | Exit gate |
 | --- | --- | --- |

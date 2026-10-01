@@ -8,21 +8,21 @@ The full design is in [docs/design.md](docs/design.md).
 
 ## Status
 
-This is the phase 1 MVP: a CPU reference engine with a CLI. It runs the two example seeds end to end.
+Phases 1 and 2 are done: a CPU reference engine, a CLI, and a SQLite world store that reads any time window back without re-simulating from the start.
 
 | Works now | Comes later (see the roadmap in the design) |
 | --- | --- |
-| Seed parsing with strict schema checks, validation errors with YAML paths, and a linter | SQLite store, checkpoints and lazy regeneration (phase 2) |
-| Philox RNG, Poisson, OU metrics, Fourier seasonality, Zipf vocabularies | MCP server and the LLM seed-authoring loop (phase 3) |
-| State machines with rate, health-dependent, timed and command transitions | Topology propagation, Hawkes bursts, clocks and skew, config system (phase 4) |
-| Scheduled faults with ground-truth cause ids | Interactive devices and a stepped clock (phase 5) |
-| A simulated responder that restarts broken devices | GPU backend (phase 6) |
+| Seed parsing with strict schema checks, validation errors with YAML paths, and a linter | MCP server and the LLM seed-authoring loop (phase 3) |
+| Philox RNG, Poisson, OU metrics, Fourier seasonality, Zipf vocabularies | Topology propagation, Hawkes bursts, clocks and skew, config system (phase 4) |
+| State machines with rate, health-dependent, timed and command transitions | Interactive devices and a stepped clock (phase 5) |
+| Scheduled faults with ground-truth cause ids, and a simulated responder | GPU backend (phase 6) |
 | 64-byte binary records, rendered on read as text, JSON lines or RFC 5424 syslog | Sinks: OTLP, Prometheus, MQTT (phase 7) |
-| Conformance tests against qmuntal/stateless and RFC 9293 | CPU ML module |
+| SQLite worlds: hourly checkpoints, 1-minute rollups and metrics, transitions, truth, optional raw events per day | CPU ML module |
+| Conformance tests against qmuntal/stateless and RFC 9293 | |
 
 ## Quick start
 
-Requires Go 1.24 or later.
+Requires Go 1.24 or later and a C compiler: the SQLite driver, [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3), uses cgo.
 
 ```bash
 go build -o simo ./cmd/simo
@@ -44,7 +44,46 @@ The last command shows the scheduled fault: silence, then a burst of card-reader
 2026-10-06T09:16:29.494Z pos-07-02 WARN card reader timeout after 3466ms
 ```
 
-`run --out DIR` writes these files:
+## Worlds: store once, read any window
+
+`run --db DIR` builds a world: a SQLite store that keeps the recipe rather than the meal. It holds the seed, hourly engine checkpoints, 1-minute event counts and metrics, every state transition, and the ground truth. Raw events are stored only for days you materialize. Reading a window that is not stored loads the nearest checkpoint and regenerates just that window, and the result is byte-identical to stored events.
+
+```bash
+./simo run examples/retail-pos.yaml --db worlds/retail          # a week in about 20 s, 62 MB
+./simo logs  worlds/retail --from "day7 23:00" --for 1h --level ERROR --explain
+./simo stats worlds/retail --from "day2 08:00" --to "day2 11:00" --step 1h --by level --device "pos-07-*"
+./simo metrics worlds/retail --device pos-07-02 --from "day2 09:00" --for 1h --step 15m
+./simo materialize worlds/retail --from day2 --to day3          # store day 2's raw events
+./simo logs  worlds/retail --from "day2 09:14" --for 2m --mode sql
+./simo devices worlds/retail --site 7
+./simo truth   worlds/retail                                    # the answer key; keep it from agents under test
+```
+
+Reading the last hour of the simulated week takes 0.17 s, because it starts from the 23:00 checkpoint instead of re-simulating seven days. The stats query shows the fault hour at site 7:
+
+```
+from              level  count
+2026-10-06 08:00  INFO   839
+2026-10-06 08:00  WARN   5
+2026-10-06 09:00  INFO   1,133
+2026-10-06 09:00  WARN   113
+2026-10-06 10:00  INFO   1,243
+2026-10-06 10:00  WARN   23
+```
+
+A world directory holds these files:
+
+| File | Contents |
+| --- | --- |
+| `seed.yaml` | The seed; its hash must match `world.db` |
+| `world.db` | Catalog (classes, states, devices, templates), `checkpoints`, `rollup_1m`, `metrics_1m`, `transitions`, `truth`, and the list of `materialized` days |
+| `events/day-0001.db` | Raw events of simulated day 1, in engine order, if materialized |
+
+`logs --mode` chooses how a world is read: `auto` (stored days from SQL, the rest regenerated), `sql` (stored days only) or `regen` (always regenerate). The databases are plain SQLite, so `sqlite3 worlds/retail/world.db` works for ad hoc queries.
+
+## Flat files
+
+`run --out DIR` writes flat files instead of a world:
 
 | File | Contents |
 | --- | --- |
@@ -88,6 +127,8 @@ The tests check the math as well as the code:
 - **Event rates:** counts match rate × time, including the integral of a Fourier pattern.
 - **Determinism:** output is identical with 1 or 7 workers, and a time window equals the same slice of a full run.
 - **Golden hashes:** the record stream of each example is pinned in `testdata/golden`. If a change is intended, bump `ir.EngineVersion` and run `go test ./internal/engine -run Golden -update`.
+- **Checkpoints:** a run resumed from any checkpoint reproduces the full run's records and transitions exactly, and taking checkpoints does not change the output.
+- **Store (the phase 2 exit gate):** a window read from stored events, the same window regenerated from a checkpoint, and a plain engine run from tick 0 are byte-identical, including across midnight and with filters. Rollup totals match the records.
 - **Conformance:**
   - Transition traces are replayed through [qmuntal/stateless](https://github.com/qmuntal/stateless) machines built from each seed, and from an independent RFC 9293 table for the TCP example.
   - Every log line is checked to be legal for its device's state.
@@ -96,14 +137,15 @@ The tests check the math as well as the code:
 ## Layout
 
 ```text
-cmd/simo/             CLI: validate, preview, run, logs
+cmd/simo/             CLI: validate, preview, run, logs, stats, metrics, devices, materialize, truth
 internal/rng/         Philox4x32-10, key derivation
 internal/dist/        Poisson, inverse normal, Zipf, parameterised distributions
 internal/spec/        seed types, YAML loading, expression parsers, validation and lint
 internal/tmpl/        message template parser and generator table
 internal/compile/     seed to IR: fleet expansion, jitter, thresholds, faults
 internal/ir/          compiled world shared by all backends
-internal/engine/      CPU reference engine
+internal/engine/      CPU reference engine, checkpoints
+internal/store/       SQLite worlds: build, read (SQL or regenerate), rollups, metrics, materialize
 internal/render/      records to text, JSON lines and syslog
 internal/record/      64-byte record encoding
 internal/conformance/ state-machine referee built on qmuntal/stateless
@@ -114,7 +156,7 @@ docs/design.md        design document
 
 ## Known gaps
 
-- There are no checkpoints yet, so every window is simulated from tick 0. That is fast enough for weeks of a few hundred devices: a simulated week of the retail example takes about 15 s on 2 cores.
+- Building a world runs single-pass on the CPU: a simulated week of the retail example (123 devices, 2.4M events) takes about 20 s on 2 cores. Rollups and metrics cover the build window only; reads beyond it regenerate from the last checkpoint.
 - Output is bit-identical on the same CPU architecture. Cross-architecture identity needs the shared polynomial `log`/`exp` planned for the GPU phase. The golden hashes were produced on linux/amd64.
 - `excite` (Hawkes bursts) is accepted in seeds but ignored until phase 4. The validator warns about it.
 

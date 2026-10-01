@@ -93,6 +93,15 @@ type Options struct {
 	OnMetric func(MetricSample)
 	// Commands are manual commands to apply.
 	Commands []Command
+	// Start resumes the run from a checkpoint instead of tick 0. From must
+	// not be before Start.Tick.
+	Start *Checkpoint
+	// CheckpointEvery is the number of ticks between checkpoints sent to
+	// OnCheckpoint; 0 means none. Checkpoints are taken at multiples of it,
+	// also before the output window.
+	CheckpointEvery int64
+	// OnCheckpoint receives each checkpoint. It may keep it.
+	OnCheckpoint func(*Checkpoint)
 }
 
 // Stats summarise a run's output window.
@@ -161,6 +170,20 @@ func Run(w *ir.World, opt Options, sink Sink) (*Stats, error) {
 	if err := s.init(opt.Commands); err != nil {
 		return nil, err
 	}
+	begin := int64(0)
+	if opt.Start != nil {
+		if err := s.load(opt.Start); err != nil {
+			return nil, err
+		}
+		begin = opt.Start.Tick
+		if s.from < begin {
+			return nil, fmt.Errorf("window starts at tick %d, before the checkpoint at tick %d", s.from, begin)
+		}
+	}
+	every := opt.CheckpointEvery
+	if opt.OnCheckpoint == nil {
+		every = 0
+	}
 
 	workers := opt.Workers
 	if workers <= 0 {
@@ -193,8 +216,14 @@ func Run(w *ir.World, opt Options, sink Sink) (*Stats, error) {
 	var trans []Transition
 	var mets []MetricSample
 
-	for b0 := int64(0); b0 < s.to; b0 += batch {
-		b1 := min(b0+batch, s.to)
+	for b0, b1 := begin, begin; b0 < s.to; b0 = b1 {
+		b1 = min(b0+batch, s.to)
+		if every > 0 {
+			if b0%every == 0 && (b0 > begin || opt.Start == nil) {
+				opt.OnCheckpoint(s.snapshot(b0))
+			}
+			b1 = min(b1, (b0/every+1)*every)
+		}
 		for t := b0; t < b1; t++ {
 			unix := startUnix + float64(t)*s.dt
 			for p := range w.Patterns {
@@ -254,6 +283,10 @@ func Run(w *ir.World, opt Options, sink Sink) (*Stats, error) {
 		for _, m := range mets {
 			opt.OnMetric(m)
 		}
+	}
+
+	if every > 0 && s.to%every == 0 && s.to < w.Ticks && s.to > begin {
+		opt.OnCheckpoint(s.snapshot(s.to))
 	}
 
 	st := &Stats{Ticks: s.to - s.from, ByEvent: make([]int64, len(w.Events))}

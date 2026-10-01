@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -114,5 +115,84 @@ func TestRunToStdoutMatchesLogs(t *testing.T) {
 func TestUnknownCommand(t *testing.T) {
 	if _, _, code := simo(t, "frobnicate"); code != 2 {
 		t.Errorf("exit code %d, want 2", code)
+	}
+}
+
+func TestWorldCommands(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tcp")
+	_, errOut, code := simo(t, "run", tcp, "--db", dir, "--materialize", "--checkpoint-every", "10m")
+	if code != 0 || !strings.Contains(errOut, "raw events stored for day1") {
+		t.Fatalf("run --db: code %d, %s", code, errOut)
+	}
+	if _, _, code := simo(t, "run", tcp, "--db", dir); code != 1 {
+		t.Error("building into an existing world did not fail")
+	}
+
+	// The same window read from storage and regenerated gives the same lines.
+	window := []string{"--from", "00:31", "--for", "7m", "--format", "jsonl"}
+	sqlOut, errOut, code := simo(t, append([]string{"logs", dir, "--mode", "sql", "--explain"}, window...)...)
+	if code != 0 || !strings.Contains(errOut, "read from stored events") {
+		t.Fatalf("logs --mode sql: code %d, %s", code, errOut)
+	}
+	regenOut, errOut, _ := simo(t, append([]string{"logs", dir, "--mode", "regen", "--explain"}, window...)...)
+	if !strings.Contains(errOut, "regenerated from a checkpoint") {
+		t.Errorf("logs --mode regen did not regenerate: %s", errOut)
+	}
+	if sqlOut == "" || sqlOut != regenOut {
+		t.Error("stored and regenerated lines differ")
+	}
+
+	// stats counts add up to the number of lines.
+	all, _, _ := simo(t, "logs", dir)
+	stats, _, code := simo(t, "stats", dir, "--by", "level")
+	if code != 0 {
+		t.Fatal("stats failed")
+	}
+	total := 0
+	for _, line := range strings.Split(strings.TrimSpace(stats), "\n")[1:] {
+		f := strings.Fields(line)
+		n, _ := strconv.Atoi(strings.ReplaceAll(f[len(f)-1], ",", ""))
+		total += n
+	}
+	if lines := strings.Count(all, "\n"); total != lines || lines == 0 {
+		t.Errorf("stats total %d, logs printed %d lines", total, lines)
+	}
+
+	out, _, _ := simo(t, "devices", dir)
+	if n := strings.Count(out, "\n"); n != 201 {
+		t.Errorf("devices printed %d lines, want header + 200", n)
+	}
+	out, _, _ = simo(t, "truth", dir)
+	if !strings.Contains(out, "no scheduled faults") {
+		t.Errorf("truth: %q", out)
+	}
+	_, errOut, _ = simo(t, "materialize", dir)
+	if !strings.Contains(errOut, "nothing to do") {
+		t.Errorf("materialize on a stored world: %q", errOut)
+	}
+	if _, errOut, code := simo(t, "metrics", dir, "--device", "conn-0001", "--metric", "temp"); code != 1 || !strings.Contains(errOut, "no metric") {
+		t.Errorf("metrics on a class without metrics: code %d, %q", code, errOut)
+	}
+}
+
+func TestWorldMetricsAndTruth(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "retail")
+	if _, errOut, code := simo(t, "run", retail, "--for", "2h", "--db", dir); code != 0 {
+		t.Fatalf("run --db: %s", errOut)
+	}
+	out, _, code := simo(t, "metrics", dir, "--device", "pos-03-01", "--step", "30m")
+	if code != 0 || strings.Count(out, "temp_c") != 4 {
+		t.Errorf("metrics: code %d, output %q", code, out)
+	}
+	out, _, _ = simo(t, "truth", dir)
+	if !strings.Contains(out, "card reader firmware bug at site 7") || !strings.Contains(out, "day2 09:15:00") {
+		t.Errorf("truth: %q", out)
+	}
+	out, _, _ = simo(t, "stats", dir, "--step", "1h", "--by", "event", "--device", "pos-03-*")
+	if strings.Count(out, "pos_terminal/txn_ok") != 2 {
+		t.Errorf("stats by hour: %q", out)
+	}
+	if _, errOut, code := simo(t, "logs", dir, "--from", "day2 09:00", "--for", "1h", "--mode", "sql"); code != 1 || !strings.Contains(errOut, "not materialized") {
+		t.Errorf("logs --mode sql outside stored days: code %d, %q", code, errOut)
 	}
 }

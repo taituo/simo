@@ -158,6 +158,9 @@ func cmdRun(args []string, stdout, stderr io.Writer) error {
 	metrics := fs.String("metrics", "", "with --out: also write metrics.jsonl at this step, e.g. 1m")
 	truth := fs.Bool("truth", false, "include the ground-truth cause in jsonl lines (never for agents under test)")
 	workers := fs.Int("workers", 0, "worker goroutines (0 = all CPUs)")
+	db := fs.String("db", "", "build a SQLite world in this directory: checkpoints, rollups, metrics, transitions, truth")
+	materialize := fs.Bool("materialize", false, "with --db: also store raw events for every whole day in the window")
+	every := fs.String("checkpoint-every", "", "with --db: checkpoint spacing (default 1h)")
 	path, err := oneArg(fs, args, "seed file")
 	if err != nil {
 		return err
@@ -173,6 +176,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) error {
 	from, to, err := wd.ticks(w)
 	if err != nil {
 		return err
+	}
+	if *db != "" {
+		if *out != "" || *trace || *metrics != "" {
+			return errors.New("--db cannot be combined with --out, --trace-states or --metrics (a world stores transitions and metrics already)")
+		}
+		return buildWorld(w, raw, *db, from, to, *materialize, *every, *workers, stderr)
+	}
+	if *materialize || *every != "" {
+		return errors.New("--materialize and --checkpoint-every need --db")
 	}
 	rend, err := render.New(w)
 	if err != nil {
@@ -373,6 +385,8 @@ func cmdLogs(args []string, stdout, stderr io.Writer) error {
 	grep := fs.String("grep", "", "only lines whose message contains this text")
 	limit := fs.Int("limit", 0, "stop after this many lines")
 	truth := fs.Bool("truth", false, "include the ground-truth cause in jsonl lines")
+	mode := fs.String("mode", "auto", "worlds only: auto, sql (stored days only) or regen (always regenerate)")
+	explain := fs.Bool("explain", false, "worlds only: report which parts were read from storage and which were regenerated")
 	dir, err := oneArg(fs, args, "run directory")
 	if err != nil {
 		return err
@@ -380,6 +394,9 @@ func cmdLogs(args []string, stdout, stderr io.Writer) error {
 	f, err := render.ParseFormat(*format)
 	if err != nil {
 		return err
+	}
+	if isWorld(dir) {
+		return logsWorld(dir, wd, f, *device, *level, *event, *grep, *mode, *limit, *truth, *explain, stdout, stderr)
 	}
 	var m Manifest
 	mj, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
