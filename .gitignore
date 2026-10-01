@@ -1,0 +1,15 @@
+# Binaries
+/simo
+/bin/
+*.exe
+
+# Generated output
+/out/
+*.db
+*.db-wal
+*.db-shm
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
