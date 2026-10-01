@@ -1,0 +1,88 @@
+# A web API on Kubernetes: checkout and catalog services, 6 pods each.
+#
+# Pods leak memory: hidden health falls and the OOM-kill rate rises with it.
+# Once a leak is severe, a pod crash-loops (OOMKilled, back-off, Running,
+# OOMKilled again) until the on-call engineer does a rollout restart, which
+# resets health. A bad checkout deploy on day 1 at 14:00 causes 30 minutes
+# of 503s.
+#
+# This seed was written by an LLM from that brief using only the MCP author
+# tools (validate_seed, preview_seed, create_world); see docs/mcp.md.
+simo: 1
+name: k8s-web-api
+master_seed: 2026
+clock: { start: 2026-10-05T00:00:00Z, duration: 2d, tick: 1s }
+
+patterns:
+  traffic: { fourier: { period: 24h, harmonics: [[1, 0.7, 13h], [2, 0.2, 10h]] } }
+
+classes:
+  checkout_pod:
+    health: { drift: -0.6/day, noise: 0.05 }
+    states:
+      Running:          { to: { OOMKilled: "health_rate(0.3/day, gamma: 7)" }, emit: [started] }
+      OOMKilled:        { to: { CrashLoopBackOff: fixed(5s) }, emit: [oom] }
+      CrashLoopBackOff: { to: { Running: fixed(40s) }, emit: [backoff] }
+    metrics:
+      memory_mi: { unit: Mi, ou: { mean: 310, theta: 1/5m, sigma: 25 }, in_state: { OOMKilled: { mean: 200 } } }
+    events:
+      - id: request
+        level: INFO
+        text: 'POST /api/checkout {status:choice(201, 201, 201, 201, 200, 409)} {ms:lognormal(3.6, 0.5)|%d}ms req={rid:hex(12)}'
+        rate: 1/s * traffic
+        only_in: [Running]
+      - id: upstream_503
+        level: ERROR
+        tags: [http5xx]
+        text: 'POST /api/checkout 503 upstream payments timed out after {ms:uniform(1000, 5000)|%d}ms req={rid:hex(12)}'
+        rate: 0.001/s * traffic
+        only_in: [Running]
+      - id: oom
+        level: ERROR
+        text: 'container checkout OOMKilled: memory limit 512Mi exceeded (rss {mb:int(512, 540)}Mi)'
+      - id: backoff
+        level: WARN
+        text: 'Back-off restarting failed container checkout'
+      - id: started
+        level: NOTICE
+        text: 'Started container checkout, restart count {n:seq}'
+    commands:
+      rollout_restart: { from: [Running, CrashLoopBackOff], to: Running, reset_health: true }
+
+  catalog_pod:
+    health: { drift: -0.3/day, noise: 0.05 }
+    states:
+      Running:          { to: { OOMKilled: "health_rate(0.3/day, gamma: 7)" }, emit: [started] }
+      OOMKilled:        { to: { CrashLoopBackOff: fixed(5s) }, emit: [oom] }
+      CrashLoopBackOff: { to: { Running: fixed(40s) }, emit: [backoff] }
+    events:
+      - id: request
+        level: INFO
+        text: 'GET /api/catalog/items/{sku:int(1000, 9999)} {status:choice(200, 200, 200, 304, 404)} {ms:lognormal(2.8, 0.6)|%d}ms req={rid:hex(12)}'
+        rate: 2/s * traffic
+        only_in: [Running]
+      - id: oom
+        level: ERROR
+        text: 'container catalog OOMKilled: memory limit 512Mi exceeded'
+      - id: backoff
+        level: WARN
+        text: 'Back-off restarting failed container catalog'
+      - id: started
+        level: NOTICE
+        text: 'Started container catalog, restart count {n:seq}'
+    commands:
+      rollout_restart: { from: [Running, CrashLoopBackOff], to: Running, reset_health: true }
+
+fleet:
+  - { class: checkout_pod, count: 6, name: "checkout-7d9f8-{i:02}" }
+  - { class: catalog_pod, count: 6, name: "catalog-5c4b2-{i:02}" }
+
+faults:
+  - at: day1 14:00
+    for: 30m
+    target: checkout_pod[*]
+    effects: [ { multiply: { tag: http5xx, by: 60 } } ]
+    label: bad deploy of checkout v2.14.0 exhausts the payments connection pool
+
+operators:
+  responder: { states: [CrashLoopBackOff], command: rollout_restart, delay: exp(25m) }

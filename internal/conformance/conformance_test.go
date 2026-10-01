@@ -123,6 +123,7 @@ func TestExamplesConformToTheirSeeds(t *testing.T) {
 	cases := map[string]int64{
 		"retail-pos.yaml":      2 * 86400, // two days at 1 s ticks: crashes, restarts and the fault
 		"tcp-connections.yaml": 0,
+		"k8s-web-api.yaml":     18 * 3600, // OOM kills, crash loops, rollout restarts from Running
 	}
 	for name, to := range cases {
 		t.Run(name, func(t *testing.T) {

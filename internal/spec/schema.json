@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/taituo/simo/seed.schema.json",
+  "title": "simo seed",
+  "description": "A seed describes a simulated world: device classes with hidden state machines, what they log, how many devices exist, what goes wrong and who fixes it. Seeds are YAML; this schema describes the YAML structure. Run validate_seed for checks this schema cannot express (references between states, events, patterns and vocabularies, and lint warnings).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["simo", "clock", "classes", "fleet"],
+  "properties": {
+    "simo": {"const": 1, "description": "Seed format version. Always 1."},
+    "name": {"type": "string", "description": "World name, used in outputs."},
+    "master_seed": {"type": "integer", "minimum": 0, "description": "Master random seed. The same seed and spec always give the same data."},
+    "clock": {"$ref": "#/$defs/clock"},
+    "patterns": {
+      "type": "object",
+      "description": "Named rate multipliers over time, referenced from event rates, e.g. rate: 0.03/s * store_hours.",
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/pattern"}
+    },
+    "vocab": {
+      "type": "object",
+      "description": "Named word lists for {name:vocab} slots in message templates.",
+      "additionalProperties": {"$ref": "#/$defs/vocab"}
+    },
+    "classes": {
+      "type": "object",
+      "description": "Device classes by name.",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/class"}
+    },
+    "fleet": {
+      "type": "array",
+      "description": "How many devices of each class exist.",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/fleet_entry"}
+    },
+    "faults": {
+      "type": "array",
+      "description": "Scheduled faults. Each gets a ground-truth cause id that labels the events it causes.",
+      "items": {"$ref": "#/$defs/fault"}
+    },
+    "operators": {"$ref": "#/$defs/operators"}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+    "state_name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$", "description": "A state of the same class. Hyphens are allowed, e.g. SYN-SENT."},
+    "duration": {
+      "type": "string",
+      "pattern": "^\\s*[+-]?[0-9]*\\.?[0-9]*\\s*(ns|us|ms|s|sec|m|min|h|hour|d|day|days|w|week)\\s*$",
+      "description": "A duration: 90s, 10m, 1.5h, 7d, or a bare unit like day."
+    },
+    "rate": {
+      "type": "string",
+      "pattern": "^\\s*[+-]?[0-9.]+(e[+-]?[0-9]+)?\\s*/\\s*[0-9.]*\\s*(ns|us|ms|s|sec|m|min|h|hour|d|day|days|w|week)\\s*$",
+      "description": "Events per unit of time: 0.03/s, 1/2h (once per two hours), 0.5/day."
+    },
+    "scalar": {"type": ["string", "number"]},
+    "distribution": {
+      "type": ["string", "number"],
+      "description": "A number or a distribution: uniform(a, b), normal(mean, sd), lognormal(mu, sigma), exp(mean). Durations are allowed as arguments where a time is meant, e.g. exp(30m)."
+    },
+    "clock": {
+      "type": "object",
+      "description": "Simulated time.",
+      "additionalProperties": false,
+      "required": ["start", "duration", "tick"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time", "description": "RFC 3339 start time, e.g. 2026-10-05T00:00:00Z."},
+        "duration": {"$ref": "#/$defs/duration", "description": "Length of the run, e.g. 7d."},
+        "tick": {"$ref": "#/$defs/duration", "description": "Simulation step, at least 1ms. 1s suits most worlds; use 100ms for fast protocols."}
+      }
+    },
+    "pattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fourier"],
+      "properties": {"fourier": {"$ref": "#/$defs/fourier"}}
+    },
+    "fourier": {
+      "type": "object",
+      "description": "F(t) = 1 + sum of amp * cos(2 pi k (t - peak) / period), clamped at 0. Pattern time starts on Monday 00:00 UTC, so a 7d period starts on Monday.",
+      "additionalProperties": false,
+      "required": ["period", "harmonics"],
+      "properties": {
+        "period": {"$ref": "#/$defs/duration"},
+        "harmonics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "description": "[k, amplitude, peak]: harmonic number, amplitude (0.9 = strong), and the time within the period when it peaks, e.g. [1, 0.9, 14h].",
+            "minItems": 3,
+            "maxItems": 3,
+            "prefixItems": [
+              {"type": "number", "exclusiveMinimum": 0},
+              {"type": "number"},
+              {"$ref": "#/$defs/duration"}
+            ]
+          }
+        }
+      }
+    },
+    "vocab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["words"],
+      "properties": {
+        "zipf": {"type": "number", "minimum": 0, "description": "Zipf exponent: 0 is uniform, about 1 means a few words dominate."},
+        "words": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "class": {
+      "type": "object",
+      "description": "A device class: a hidden state machine plus what it emits.",
+      "additionalProperties": false,
+      "required": ["states"],
+      "properties": {
+        "initial": {"$ref": "#/$defs/state_name", "description": "Initial state; default is the first state listed."},
+        "health": {"$ref": "#/$defs/health"},
+        "states": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "States in order. Each lists where it can go and by which law.",
+          "propertyNames": {"$ref": "#/$defs/state_name"},
+          "additionalProperties": {"$ref": "#/$defs/state"}
+        },
+        "metrics": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/metric"}
+        },
+        "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "commands": {
+          "type": "object",
+          "description": "Actions operators can take, e.g. restart.",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/command"}
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "description": "A hidden value in [0, 1], starting at 1, that drifts and drives health_rate transitions: falling health raises failure rates before anything breaks.",
+      "additionalProperties": false,
+      "properties": {
+        "drift": {"$ref": "#/$defs/rate", "description": "Change per time, usually negative, e.g. -0.03/day."},
+        "noise": {"type": "number", "minimum": 0, "description": "Standard deviation per square root of a day."}
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "type": "object",
+          "description": "Target state -> transition law.",
+          "propertyNames": {"$ref": "#/$defs/state_name"},
+          "additionalProperties": {"$ref": "#/$defs/transition"}
+        },
+        "emit": {"type": "array", "description": "Event ids emitted on entering this state.", "items": {"$ref": "#/$defs/identifier"}}
+      }
+    },
+    "transition": {
+      "type": "string",
+      "pattern": "^\\s*([0-9.]+(e[+-]?[0-9]+)?\\s*/.+|fixed\\(.+\\)|on_command\\(.+\\)|health_rate\\(.+\\)|rate\\(.+\\))\\s*$",
+      "description": "A rate like 1/2h (memoryless), health_rate(0.5/day, gamma: 6) (rate x exp(gamma x (1 - health))), fixed(90s) (after a fixed time in the state) or on_command(restart) (only when that command runs)."
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ou"],
+      "properties": {
+        "unit": {"type": "string"},
+        "ou": {
+          "type": "object",
+          "description": "Mean-reverting noise (Ornstein-Uhlenbeck).",
+          "additionalProperties": false,
+          "required": ["mean", "theta", "sigma"],
+          "properties": {
+            "mean": {"type": "number"},
+            "theta": {"$ref": "#/$defs/rate", "description": "How fast it returns to the mean, e.g. 1/10m."},
+            "sigma": {"type": "number", "minimum": 0, "description": "Long-run standard deviation."}
+          }
+        },
+        "in_state": {
+          "type": "object",
+          "description": "State -> change while in that state.",
+          "propertyNames": {"$ref": "#/$defs/state_name"},
+          "additionalProperties": {"$ref": "#/$defs/metric_shift"}
+        }
+      }
+    },
+    "metric_shift": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"mean": {"type": "number", "description": "Added to the mean, e.g. 15."}}
+    },
+    "event": {
+      "type": "object",
+      "description": "A log line template and when it fires.",
+      "additionalProperties": false,
+      "required": ["id", "level", "text"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "level": {"enum": ["DEBUG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "CRIT"]},
+        "text": {
+          "type": "string",
+          "description": "Message with up to 5 placeholders {name:generator(args)|format}. Generators: hex(n), int(a, b), uniform(a, b), normal(mean, sd), lognormal(mu, sigma), exp(mean), choice(a, b, ...), vocab or vocab(name), ip(cidr), uuid, metric(name) (the device's current value), seq (per-device counter). Formats: %d, %.2f, %x. Write {{ for a literal brace."
+        },
+        "rate": {"$ref": "#/$defs/scalar", "description": "Base rate times patterns, e.g. 0.03/s * store_hours. Omit for events only emitted on entering a state or by a command."},
+        "tags": {"type": "array", "items": {"type": "string"}, "description": "Labels that fault effects can target."},
+        "in_state": {
+          "type": "object",
+          "description": "State -> rate multiplier, e.g. {degraded: x40}.",
+          "propertyNames": {"$ref": "#/$defs/state_name"},
+          "additionalProperties": {"type": ["string", "number"], "pattern": "^\\s*[x×]?[0-9.]+\\s*$"}
+        },
+        "only_in": {"type": "array", "description": "States in which the event can fire; all others count as x0.", "items": {"$ref": "#/$defs/state_name"}},
+        "excite": {"type": "object", "description": "Hawkes self-excitation (bursts). Planned for phase 4; accepted but ignored."}
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/state_name"}},
+        "to": {"$ref": "#/$defs/state_name"},
+        "reset_health": {"type": "boolean", "description": "Set health back to 1, e.g. a restart clears a leak."},
+        "emit": {"type": "array", "items": {"$ref": "#/$defs/identifier"}}
+      }
+    },
+    "fleet_entry": {
+      "type": "object",
+      "description": "Expands one class into devices: either count, or sites with per_site.",
+      "additionalProperties": false,
+      "required": ["class"],
+      "properties": {
+        "class": {"$ref": "#/$defs/identifier"},
+        "count": {"$ref": "#/$defs/distribution"},
+        "sites": {"type": "integer", "minimum": 0},
+        "per_site": {"$ref": "#/$defs/distribution", "description": "Devices per site, e.g. uniform(4, 8) (inclusive)."},
+        "name": {"type": "string", "description": "Device name pattern with {site}, {n} (index in site), {i} (index in entry), {class}; widths like {site:02}."},
+        "jitter": {
+          "type": "object",
+          "description": "Per-device variation: rate_scale (multiplies all event rates) or <metric>.mean (added to a metric's mean).",
+          "additionalProperties": {"$ref": "#/$defs/distribution"}
+        }
+      }
+    },
+    "fault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "target", "effects"],
+      "properties": {
+        "at": {"$ref": "#/$defs/scalar", "description": "Start: \"day2 09:15\" (day 1 is the first) or an offset like 26h."},
+        "for": {"$ref": "#/$defs/duration", "description": "Length; omit to last until the end."},
+        "target": {"type": "string", "pattern": "^(site\\[(\\d+|\\*)\\]/)?[A-Za-z_][A-Za-z0-9_-]*\\[(\\d+|\\*)\\]$", "description": "Devices: site[7]/pos_terminal[*], pos_terminal[3] or site[*]/pos_terminal[1]. Indexes are 1-based."},
+        "effects": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/effect"}},
+        "label": {"type": "string", "description": "Human description for the answer key."}
+      }
+    },
+    "effect": {
+      "type": "object",
+      "description": "Exactly one of multiply or health.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "multiply": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tag", "by"],
+          "properties": {
+            "tag": {"type": "string", "description": "Event tag to multiply, or * for all events of the class."},
+            "by": {"type": "number", "minimum": 0}
+          }
+        },
+        "health": {"type": "number", "description": "Added to health when the fault starts, e.g. -0.3."}
+      }
+    },
+    "operators": {
+      "type": "object",
+      "description": "Simulated people.",
+      "additionalProperties": false,
+      "properties": {
+        "responder": {
+          "type": "object",
+          "description": "Notices devices entering any of states and, after the delay, runs command if it is allowed in the device's state at that moment (so it still fixes a crash-looping device that is briefly running).",
+          "additionalProperties": false,
+          "required": ["states", "command", "delay"],
+          "properties": {
+            "states": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/state_name"}},
+            "command": {"$ref": "#/$defs/identifier"},
+            "delay": {"$ref": "#/$defs/distribution", "description": "e.g. exp(30m), uniform(10m, 40m) or 20m."}
+          }
+        }
+      }
+    }
+  }
+}

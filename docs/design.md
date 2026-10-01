@@ -693,7 +693,7 @@ The stationary-distribution check and the TCP fixture join phase 1's exit gate.
 
 Build the CPU path first and add the GPU once there is a trusted reference to compare it with. Phase 3 already gives a usable tool: an LLM writes a seed, and agents read realistic logs over MCP.
 
-**Status (October 2026):** phases 1 and 2 are implemented; their exit gates are automated tests (see the README).
+**Status (October 2026):** phases 1 to 3 are implemented. The phase 1 and 2 exit gates are automated tests; the phase 3 author loop was run by an LLM and is described in docs/mcp.md. The MCP server is a small in-repo protocol implementation rather than the official SDK, whose current releases need Go 1.25 and golang.org-hosted modules.
 
 | Phase | What gets built | Exit gate |
 | --- | --- | --- |

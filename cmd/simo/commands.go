@@ -12,13 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/taituo/simo/internal/engine"
 	"github.com/taituo/simo/internal/ir"
 	"github.com/taituo/simo/internal/record"
 	"github.com/taituo/simo/internal/render"
+	"github.com/taituo/simo/internal/report"
 	"github.com/taituo/simo/internal/spec"
 )
 
@@ -73,61 +73,7 @@ func cmdPreview(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	const keep = 500000
-	var sample []record.Record
-	st, err := engine.Run(w, engine.Options{From: from, To: to, Workers: *workers}, func(recs []record.Record) error {
-		if room := keep - len(sample); room > 0 {
-			sample = append(sample, recs[:min(room, len(recs))]...)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	rend, err := render.New(w)
-	if err != nil {
-		return err
-	}
-	span := time.Duration(to-from) * w.Tick
-	fmt.Fprintf(stdout, "%s: %s in %s, tick %s, previewing %s from %s\n", w.Name, plural(len(w.Devices), "device"),
-		plural(len(w.Classes), "class"), w.Tick, fmtSpan(span), fmtOffset(time.Duration(from)*w.Tick))
-	fmt.Fprintf(stdout, "records: %s (%.1f per second), transitions: %s\n\n", commas(st.Records),
-		float64(st.Records)/span.Seconds(), commas(st.Transitions))
-
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "event\tlevel\tcount\tper hour\t")
-	for e, n := range st.ByEvent {
-		ev := &w.Events[e]
-		fmt.Fprintf(tw, "%s/%s\t%s\t%s\t%.0f\t\n", w.Classes[ev.Class].Name, ev.ID, spec.Levels[ev.Level], commas(n), float64(n)/span.Hours())
-	}
-	tw.Flush()
-
-	fmt.Fprintln(stdout, "\ntime in state:")
-	for c, cls := range w.Classes {
-		total := int64(0)
-		for _, n := range st.StateTicks[c] {
-			total += n
-		}
-		var parts []string
-		for i, n := range st.StateTicks[c] {
-			if total > 0 {
-				parts = append(parts, fmt.Sprintf("%s %.2f%%", cls.States[i].Name, 100*float64(n)/float64(total)))
-			}
-		}
-		fmt.Fprintf(stdout, "  %s: %s\n", cls.Name, strings.Join(parts, ", "))
-	}
-
-	if *lines > 0 && len(sample) > 0 {
-		fmt.Fprintln(stdout, "\nsample lines:")
-		n := min(*lines, len(sample))
-		var buf []byte
-		for i := 0; i < n; i++ {
-			rec := sample[i*len(sample)/n]
-			buf = rend.Line(buf[:0], &rec, f)
-			fmt.Fprintf(stdout, "  %s\n", buf)
-		}
-	}
-	return nil
+	return report.Preview(w, report.PreviewOptions{From: from, To: to, Lines: *lines, Format: f, Workers: *workers}, stdout)
 }
 
 // Manifest describes a run directory.

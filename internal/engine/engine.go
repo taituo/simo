@@ -435,7 +435,10 @@ func (s *sim) step(sh *shard, d int, t int64, pf []float64, slow bool, active []
 	}
 	if s.pendTick[d] == t {
 		s.pendTick[d] = -1
-		if r := w.Responder; !moved && r.States[dev.Class][s.state[d]] && r.Command[dev.Class] >= 0 {
+		// The responder acts on what it noticed: it runs the command if the
+		// command is allowed in the device's state now, even if the device
+		// has briefly left the state that drew attention (a crash loop).
+		if r := w.Responder; !moved && r.Command[dev.Class] >= 0 {
 			moved = s.command(sh, d, t, r.Command[dev.Class], CauseOperator)
 		}
 		s.scheduleResponder(d, t) // re-arm if the device still needs attention

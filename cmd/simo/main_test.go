@@ -196,3 +196,32 @@ func TestWorldMetricsAndTruth(t *testing.T) {
 		t.Errorf("logs --mode sql outside stored days: code %d, %q", code, errOut)
 	}
 }
+
+func TestServeStdio(t *testing.T) {
+	old := stdin
+	defer func() { stdin = old }()
+	stdin = strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_examples","arguments":{}}}`,
+	}, "\n") + "\n")
+	out, errOut, code := simo(t, "serve", "--role", "author", "--worlds", t.TempDir())
+	if code != 0 {
+		t.Fatalf("serve: code %d, %s", code, errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdout must carry only protocol messages; got %q", out)
+	}
+	for _, l := range lines {
+		if !json.Valid([]byte(l)) {
+			t.Fatalf("not JSON: %s", l)
+		}
+	}
+	if !strings.Contains(lines[0], `"protocolVersion":"2025-06-18"`) || !strings.Contains(lines[1], "tcp-connections") {
+		t.Errorf("unexpected responses:\n%s", out)
+	}
+	if _, errOut, code := simo(t, "serve", "--world", t.TempDir()); code != 1 || !strings.Contains(errOut, "not a world directory") {
+		t.Errorf("serve on a non-world: code %d, %s", code, errOut)
+	}
+}

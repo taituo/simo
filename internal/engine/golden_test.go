@@ -26,6 +26,7 @@ func TestGoldenHashes(t *testing.T) {
 	}{
 		{"retail-pos.yaml", 12 * 3600},
 		{"tcp-connections.yaml", 0},
+		{"k8s-web-api.yaml", 12 * 3600},
 	}
 	for _, c := range cases {
 		t.Run(c.seed, func(t *testing.T) {

@@ -151,7 +151,8 @@ type Operators struct {
 	Responder *Responder `yaml:"responder"`
 }
 
-// Responder notices devices in some states and runs a command after a delay.
+// Responder notices devices entering some states and, after a delay, runs a
+// command if the command is allowed in the device's state at that moment.
 type Responder struct {
 	States  []string `yaml:"states"`
 	Command string   `yaml:"command"`

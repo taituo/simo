@@ -8,16 +8,17 @@ The full design is in [docs/design.md](docs/design.md).
 
 ## Status
 
-Phases 1 and 2 are done: a CPU reference engine, a CLI, and a SQLite world store that reads any time window back without re-simulating from the start.
+Phases 1 to 3 are done: a CPU reference engine, a CLI, a SQLite world store that reads any time window back without re-simulating from the start, and an MCP server for agents and seed authors.
 
 | Works now | Comes later (see the roadmap in the design) |
 | --- | --- |
-| Seed parsing with strict schema checks, validation errors with YAML paths, and a linter | MCP server and the LLM seed-authoring loop (phase 3) |
-| Philox RNG, Poisson, OU metrics, Fourier seasonality, Zipf vocabularies | Topology propagation, Hawkes bursts, clocks and skew, config system (phase 4) |
-| State machines with rate, health-dependent, timed and command transitions | Interactive devices and a stepped clock (phase 5) |
-| Scheduled faults with ground-truth cause ids, and a simulated responder | GPU backend (phase 6) |
-| 64-byte binary records, rendered on read as text, JSON lines or RFC 5424 syslog | Sinks: OTLP, Prometheus, MQTT (phase 7) |
-| SQLite worlds: hourly checkpoints, 1-minute rollups and metrics, transitions, truth, optional raw events per day | CPU ML module |
+| Seed parsing with strict schema checks, validation errors with YAML paths, a linter, and a JSON Schema | Topology propagation, Hawkes bursts, clocks and skew, config system (phase 4) |
+| Philox RNG, Poisson, OU metrics, Fourier seasonality, Zipf vocabularies | Interactive devices and a stepped clock (phase 5) |
+| State machines with rate, health-dependent, timed and command transitions | GPU backend (phase 6) |
+| Scheduled faults with ground-truth cause ids, and a simulated responder | Sinks: OTLP, Prometheus, MQTT (phase 7) |
+| 64-byte binary records, rendered on read as text, JSON lines or RFC 5424 syslog | CPU ML module |
+| SQLite worlds: hourly checkpoints, 1-minute rollups and metrics, transitions, truth, optional raw events per day | |
+| MCP server (stdio and HTTP) with observer, author and admin roles | |
 | Conformance tests against qmuntal/stateless and RFC 9293 | |
 
 ## Quick start
@@ -81,6 +82,18 @@ A world directory holds these files:
 
 `logs --mode` chooses how a world is read: `auto` (stored days from SQL, the rest regenerated), `sql` (stored days only) or `regen` (always regenerate). The databases are plain SQLite, so `sqlite3 worlds/retail/world.db` works for ad hoc queries.
 
+## Agents over MCP
+
+`simo serve` lets agents investigate worlds and lets an LLM author seeds. An agent under test gets only the observer role:
+
+```bash
+./simo serve --role observer --world worlds/retail                 # stdio, one world, read only
+./simo serve --role author,observer --worlds worlds                # write seeds, build worlds, read them
+./simo serve --role observer --worlds worlds --http 127.0.0.1:8765 # streamable HTTP at /mcp
+```
+
+Observers get `describe_world`, `summarize_logs`, `search_logs` (paged, at most 200 lines per call), `get_metrics`, `list_changes` and `list_devices`. Authors get `get_seed_schema`, `list_examples`, `validate_seed`, `preview_seed` and `create_world`. The `admin` role adds `get_truth`. [docs/mcp.md](docs/mcp.md) covers client setup, every tool, and a transcript of an LLM turning a brief into [examples/k8s-web-api.yaml](examples/k8s-web-api.yaml).
+
 ## Flat files
 
 `run --out DIR` writes flat files instead of a world:
@@ -97,7 +110,7 @@ A world directory holds these files:
 
 ## Writing a seed
 
-A seed describes a world: classes of devices, what states they move between, what they log, how many there are, and what goes wrong. The two files in [examples/](examples) are commented starting points. `simo validate` explains anything it rejects.
+A seed describes a world: classes of devices, what states they move between, what they log, how many there are, and what goes wrong. The three files in [examples/](examples) are commented starting points: a retail payment-terminal fleet, RFC 9293 TCP connections, and Kubernetes pods that leak memory and crash-loop. `simo validate` explains anything it rejects, and [internal/spec/schema.json](internal/spec/schema.json) is the JSON Schema of the format.
 
 | Construct | Example |
 | --- | --- |
@@ -128,6 +141,8 @@ The tests check the math as well as the code:
 - **Determinism:** output is identical with 1 or 7 workers, and a time window equals the same slice of a full run.
 - **Golden hashes:** the record stream of each example is pinned in `testdata/golden`. If a change is intended, bump `ir.EngineVersion` and run `go test ./internal/engine -run Golden -update`.
 - **Checkpoints:** a run resumed from any checkpoint reproduces the full run's records and transitions exactly, and taking checkpoints does not change the output.
+- **Schema:** the JSON Schema lists exactly the fields the Go types accept, the examples conform to it, and broken seeds fail it.
+- **MCP:** protocol tests (version negotiation, errors, batches, stdio, HTTP with Origin checks); tool tests for roles, paging (concatenated pages equal one store query), world pinning, hidden-state hygiene, and the author loop.
 - **Store (the phase 2 exit gate):** a window read from stored events, the same window regenerated from a checkpoint, and a plain engine run from tick 0 are byte-identical, including across midnight and with filters. Rollup totals match the records.
 - **Conformance:**
   - Transition traces are replayed through [qmuntal/stateless](https://github.com/qmuntal/stateless) machines built from each seed, and from an independent RFC 9293 table for the TCP example.
@@ -137,7 +152,7 @@ The tests check the math as well as the code:
 ## Layout
 
 ```text
-cmd/simo/             CLI: validate, preview, run, logs, stats, metrics, devices, materialize, truth
+cmd/simo/             CLI: validate, preview, run, logs, stats, metrics, devices, materialize, truth, serve
 internal/rng/         Philox4x32-10, key derivation
 internal/dist/        Poisson, inverse normal, Zipf, parameterised distributions
 internal/spec/        seed types, YAML loading, expression parsers, validation and lint
@@ -146,12 +161,16 @@ internal/compile/     seed to IR: fleet expansion, jitter, thresholds, faults
 internal/ir/          compiled world shared by all backends
 internal/engine/      CPU reference engine, checkpoints
 internal/store/       SQLite worlds: build, read (SQL or regenerate), rollups, metrics, materialize
+internal/report/      time windows, preview and tables shared by the CLI and MCP
+internal/mcp/         MCP protocol: JSON-RPC over stdio and streamable HTTP
+internal/mcpserver/   simo's MCP tools and resources, by role
 internal/render/      records to text, JSON lines and syslog
 internal/record/      64-byte record encoding
 internal/conformance/ state-machine referee built on qmuntal/stateless
-examples/             example seeds
+examples/             example seeds (embedded in the binary for authors)
 testdata/golden/      record-stream hashes
 docs/design.md        design document
+docs/mcp.md           MCP setup, tools and the author loop
 ```
 
 ## Known gaps
@@ -159,6 +178,8 @@ docs/design.md        design document
 - Building a world runs single-pass on the CPU: a simulated week of the retail example (123 devices, 2.4M events) takes about 20 s on 2 cores. Rollups and metrics cover the build window only; reads beyond it regenerate from the last checkpoint.
 - Output is bit-identical on the same CPU architecture. Cross-architecture identity needs the shared polynomial `log`/`exp` planned for the GPU phase. The golden hashes were produced on linux/amd64.
 - `excite` (Hawkes bursts) is accepted in seeds but ignored until phase 4. The validator warns about it.
+- Faults cannot write their own log lines (a deploy shows only through its effects), and metrics cannot follow hidden health. Both are phase 4 work.
+- The MCP layer is a small in-repo implementation; see the note in [docs/mcp.md](docs/mcp.md).
 
 ## Licence
 

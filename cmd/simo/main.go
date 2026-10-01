@@ -13,11 +13,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/taituo/simo/internal/compile"
 	"github.com/taituo/simo/internal/ir"
+	"github.com/taituo/simo/internal/report"
 	"github.com/taituo/simo/internal/spec"
 )
 
@@ -38,6 +38,11 @@ World commands (a directory built with run --db):
   simo devices     WORLD              list devices
   simo materialize WORLD [flags]      store raw events for whole days
   simo truth       WORLD              ground truth: scheduled faults (never show to agents under test)
+
+MCP server:
+  simo serve [--role observer,author,admin] [--worlds DIR] [--world NAME|DIR] [--http ADDR]
+             stdio by default; --http serves streamable HTTP at /mcp
+
   simo version
 
 Time flags (preview, run, logs, stats, metrics, materialize):
@@ -77,6 +82,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdMaterialize(args[1:], stdout, stderr)
 	case "truth":
 		err = cmdTruth(args[1:], stdout, stderr)
+	case "serve":
+		err = cmdServe(args[1:], stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintf(stdout, "simo %s (engine %s)\n", version, ir.EngineVersion)
 	case "help", "-h", "--help":
@@ -153,84 +160,26 @@ type window struct {
 }
 
 func (wd *window) register(fs *flag.FlagSet, defaultFor string) {
-	fs.StringVar(&wd.from, "from", "", `window start: "day2 09:15", "09:15" or an offset like 26h`)
+	fs.StringVar(&wd.from, "from", "", `window start: "day2 09:15", "09:15", an offset like 26h, or an RFC 3339 time`)
 	fs.StringVar(&wd.to, "to", "", "window end (same forms as --from)")
 	fs.StringVar(&wd.dur, "for", defaultFor, "window length, e.g. 1h")
 }
 
 // ticks resolves the window to [from, to) ticks of w.
 func (wd *window) ticks(w *ir.World) (int64, int64, error) {
-	var from, to time.Duration
-	var err error
-	if wd.from != "" {
-		if from, err = spec.ParseTimePoint(wd.from); err != nil {
-			return 0, 0, fmt.Errorf("--from: %w", err)
-		}
+	from, to, err := report.Window(w, wd.from, wd.to, wd.dur)
+	if err != nil {
+		return 0, 0, fmt.Errorf("--%w", err)
 	}
-	end := time.Duration(w.Ticks) * w.Tick
-	to = end
-	switch {
-	case wd.to != "":
-		if to, err = spec.ParseTimePoint(wd.to); err != nil {
-			return 0, 0, fmt.Errorf("--to: %w", err)
-		}
-	case wd.dur != "":
-		d, err := spec.ParseDuration(wd.dur)
-		if err != nil {
-			return 0, 0, fmt.Errorf("--for: %w", err)
-		}
-		to = from + d
-	}
-	to = min(to, end)
-	if from >= to {
-		return 0, 0, fmt.Errorf("empty window: %s to %s (the run lasts %s)", fmtOffset(from), fmtOffset(to), fmtOffset(end))
-	}
-	return int64(from / w.Tick), int64(to / w.Tick), nil
+	return from, to, nil
 }
 
-// fmtOffset prints an offset from the start as "dayN HH:MM:SS".
-func fmtOffset(d time.Duration) string {
-	day := int(d / (24 * time.Hour))
-	rest := d - time.Duration(day)*24*time.Hour
-	h, m, s := int(rest.Hours()), int(rest.Minutes())%60, int(rest.Seconds())%60
-	return fmt.Sprintf("day%d %02d:%02d:%02d", day+1, h, m, s)
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, word)
-	}
-	return fmt.Sprintf("%d %ss", n, word)
-}
-
-func commas(n int64) string {
-	s := fmt.Sprint(n)
-	if n < 0 {
-		return "-" + commas(-n)
-	}
-	var b strings.Builder
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
-}
+func fmtOffset(d time.Duration) string { return report.Offset(d) }
+func fmtSpan(d time.Duration) string   { return report.Span(d) }
+func plural(n int, word string) string { return report.Plural(n, word) }
+func commas(n int64) string            { return report.Commas(n) }
 
 // loadQuiet compiles an already parsed and validated seed.
 func loadQuiet(s *spec.Seed, raw []byte) (*ir.World, error) {
 	return compile.Compile(s, raw)
-}
-
-// fmtSpan prints a length of time: "7d", "1h0m0s", "2d 3h0m0s".
-func fmtSpan(d time.Duration) string {
-	day := 24 * time.Hour
-	switch {
-	case d >= day && d%day == 0:
-		return fmt.Sprintf("%dd", d/day)
-	case d >= day:
-		return fmt.Sprintf("%dd %s", d/day, d%day)
-	}
-	return d.String()
 }

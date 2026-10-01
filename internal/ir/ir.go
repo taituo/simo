@@ -14,7 +14,7 @@ import (
 // EngineVersion identifies the record stream an engine produces. "Same seed,
 // same output" holds only for the same engine version; bump it deliberately
 // when the stream for an example seed changes.
-const EngineVersion = "0.1.0"
+const EngineVersion = "0.2.0"
 
 // patternEpoch is Monday 1970-01-05 00:00 UTC. Pattern time is measured from
 // it, so weekly patterns start on Monday.

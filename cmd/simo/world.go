@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/taituo/simo/internal/ir"
 	"github.com/taituo/simo/internal/record"
 	"github.com/taituo/simo/internal/render"
+	"github.com/taituo/simo/internal/report"
 	"github.com/taituo/simo/internal/spec"
 	"github.com/taituo/simo/internal/store"
 )
@@ -54,10 +54,6 @@ func devicesMatching(w *ir.World, pattern string) ([]uint32, error) {
 		return nil, fmt.Errorf("no device matches %q", pattern)
 	}
 	return ids, nil
-}
-
-func clock(w *ir.World, minute int64) string {
-	return w.Start.Add(time.Duration(minute) * time.Minute).Format("2006-01-02 15:04")
 }
 
 // buildWorld implements run --db.
@@ -210,19 +206,14 @@ func cmdStats(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	header := "from\t" + strings.Join(q.By, "\t") + "\tcount"
-	fmt.Fprintln(tw, strings.TrimSuffix(strings.ReplaceAll(header, "\t\t", "\t"), "\t"))
-	for _, r := range rows {
-		cells := append([]string{clock(w, r.Minute)}, r.Keys...)
-		cells = append(cells, commas(r.N))
-		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	if err := report.RollupTable(w, q.By, rows, stdout); err != nil {
+		return err
 	}
 	if len(rows) == 0 {
 		fmt.Fprintf(stderr, "no counts in the window (rollups cover the build window, %s to %s)\n",
 			fmtOffset(time.Duration(st.BuildFrom)*w.Tick), fmtOffset(time.Duration(st.BuildTo)*w.Tick))
 	}
-	return tw.Flush()
+	return nil
 }
 
 func cmdMetrics(args []string, stdout, stderr io.Writer) error {
@@ -260,26 +251,21 @@ func cmdMetrics(args []string, stdout, stderr io.Writer) error {
 		}
 		from, to = store.MinuteOf(f*w.TickNs), store.MinuteOf(t*w.TickNs+int64(time.Minute)-1)
 	}
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "from\tmetric\tmin\tavg\tmax\t")
-	found := false
+	var series []report.MetricSeries
 	for mi, m := range cls.Metrics {
 		if *metric != "" && m.Name != *metric {
 			continue
 		}
-		found = true
 		rows, err := st.Metrics(dev.ID, mi, from, to, int64(d/time.Minute))
 		if err != nil {
 			return err
 		}
-		for _, r := range rows {
-			fmt.Fprintf(tw, "%s\t%s\t%.2f\t%.2f\t%.2f\t\n", clock(w, r.Minute), m.Name, r.Min, r.Avg, r.Max)
-		}
+		series = append(series, report.MetricSeries{Name: m.Name, Unit: m.Unit, Rows: rows})
 	}
-	if !found {
+	if len(series) == 0 {
 		return fmt.Errorf("%s has no metric %q", dev.Name, *metric)
 	}
-	return tw.Flush()
+	return report.MetricsTable(w, series, stdout)
 }
 
 func cmdDevices(args []string, stdout, stderr io.Writer) error {
@@ -293,16 +279,14 @@ func cmdDevices(args []string, stdout, stderr io.Writer) error {
 	}
 	defer st.Close()
 	w := st.World
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "device\tclass\tsite")
+	var list []ir.Device
 	for _, d := range w.Devices {
-		cls := w.Classes[d.Class].Name
-		if (*class != "" && cls != *class) || (*site != 0 && d.Site != *site) {
+		if (*class != "" && w.Classes[d.Class].Name != *class) || (*site != 0 && d.Site != *site) {
 			continue
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\n", d.Name, cls, d.Site)
+		list = append(list, d)
 	}
-	return tw.Flush()
+	return report.DevicesTable(w, list, stdout)
 }
 
 func cmdMaterialize(args []string, stdout, stderr io.Writer) error {
@@ -349,21 +333,5 @@ func cmdTruth(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer st.Close()
-	w := st.World
-	if len(w.Faults) == 0 {
-		fmt.Fprintln(stdout, "no scheduled faults")
-		return nil
-	}
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "cause\tstart\tend\ttarget\tdevices\tlabel")
-	for _, f := range w.Faults {
-		n := 0
-		for _, in := range f.Member {
-			if in {
-				n++
-			}
-		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%d\t%s\n", f.ID, fmtOffset(time.Duration(f.Start)*w.Tick), fmtOffset(time.Duration(f.End)*w.Tick), f.Target, n, f.Label)
-	}
-	return tw.Flush()
+	return report.TruthTable(st.World, stdout)
 }
