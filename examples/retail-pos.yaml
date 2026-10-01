@@ -1,0 +1,82 @@
+# A retail chain's card-payment terminals.
+#
+# Each terminal has a hidden health value that slowly drifts down. Lower
+# health raises the rate of falling into "degraded", where card-reader
+# warnings multiply by 40 and the terminal runs 15 C hotter: early warning
+# signs before it goes down. A simulated responder restarts terminals that go
+# down, and a scheduled fault hits one site on day 2.
+simo: 1
+name: retail-pos-fleet
+master_seed: 42
+clock: { start: 2026-10-05T00:00:00Z, duration: 7d, tick: 1s }
+
+patterns:
+  # Stores are busy in the afternoon and quiet at night (times are UTC).
+  store_hours: { fourier: { period: 24h, harmonics: [[1, 0.9, 14h], [2, 0.3, 11h]] } }
+  # Busier towards the weekend. Pattern time starts on Monday 00:00 UTC.
+  weekly: { fourier: { period: 7d, harmonics: [[1, 0.2, 5d]] } }
+
+vocab:
+  cashier:
+    zipf: 1.1
+    words: [Aino, Eero, Helmi, Ilmari, Kaisa, Lauri, Mikael, Noora, Oskari, Pihla, Sanna, Veeti]
+
+classes:
+  pos_terminal:
+    health: { drift: -0.03/day, noise: 0.02 }
+    states:
+      ok:        { to: { degraded: "health_rate(0.5/day, gamma: 6)" } }
+      degraded:  { to: { ok: 1/2h, down: 1/6h } }
+      down:      { emit: [crash] }
+      rebooting: { to: { ok: fixed(90s) }, emit: [boot] }
+    metrics:
+      temp_c:
+        unit: C
+        ou: { mean: 42, theta: 1/10m, sigma: 0.8 }
+        in_state: { degraded: { mean: 15 }, down: { mean: -10 } }
+    events:
+      - id: txn_ok
+        level: INFO
+        text: "txn {txn:hex(16)} by {cashier:vocab} amount={eur:lognormal(3.0, 0.9)|%.2f} EUR in {ms:lognormal(5.2, 0.4)|%d}ms"
+        rate: 0.03/s * store_hours * weekly
+        only_in: [ok, degraded]
+        in_state: { degraded: x0.6 }
+      - id: reader_timeout
+        level: WARN
+        tags: [hardware]
+        text: "card reader timeout after {ms:uniform(3000, 5000)|%d}ms"
+        rate: 0.0002/s
+        only_in: [ok, degraded]
+        in_state: { degraded: x40 }
+      - id: temp_report
+        level: INFO
+        text: "board temperature {t:metric(temp_c)|%.1f}C"
+        rate: 1/15m
+        only_in: [ok, degraded]
+      - id: crash
+        level: ERROR
+        text: "payment service crashed: {reason:choice(watchdog_timeout, segfault, out_of_memory)}"
+      - id: boot
+        level: NOTICE
+        text: "boot #{n:seq}: firmware 4.2.7 starting, previous shutdown unclean"
+    commands:
+      restart: { from: [degraded, down], to: rebooting, reset_health: true }
+
+fleet:
+  - class: pos_terminal
+    sites: 20
+    per_site: uniform(4, 8)
+    name: pos-{site:02}-{n:02}
+    jitter: { rate_scale: "lognormal(0, 0.3)", temp_c.mean: "normal(0, 1.5)" }
+
+faults:
+  - at: day2 09:15
+    for: 40m
+    target: site[7]/pos_terminal[*]
+    effects:
+      - multiply: { tag: hardware, by: 25 }
+      - health: -0.3
+    label: card reader firmware bug at site 7
+
+operators:
+  responder: { states: [down], command: restart, delay: exp(30m) }

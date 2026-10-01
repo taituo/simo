@@ -1,0 +1,54 @@
+# TCP connection lifecycles on a busy web server, following the RFC 9293
+# state machine.
+#
+# Each device is one connection slot: it opens actively or passively,
+# exchanges data and closes through the FIN states, then waits in TIME-WAIT
+# (60 s, as Linux does; RFC 9293 suggests 2 x MSL). The conformance test
+# replays the transitions against an independent table of RFC 9293
+# transitions, so a transition the RFC does not allow fails the build.
+simo: 1
+name: tcp-connections
+master_seed: 9293
+clock: { start: 2026-10-05T00:00:00Z, duration: 1h, tick: 100ms }
+
+classes:
+  tcp_conn:
+    initial: CLOSED
+    states:
+      CLOSED:       { to: { LISTEN: 1/20s, SYN-SENT: 1/10s } }
+      LISTEN:       { to: { SYN-RECEIVED: 1/2s, SYN-SENT: 1/10m, CLOSED: 1/5m } }
+      SYN-SENT:     { to: { ESTABLISHED: 1/80ms, SYN-RECEIVED: 1/60s, CLOSED: 1/3s }, emit: [syn_sent] }
+      SYN-RECEIVED: { to: { ESTABLISHED: 1/100ms, LISTEN: 1/10s, FIN-WAIT-1: 1/30s } }
+      ESTABLISHED:  { to: { FIN-WAIT-1: 1/20s, CLOSE-WAIT: 1/25s, CLOSED: 1/10m }, emit: [established] }
+      FIN-WAIT-1:   { to: { FIN-WAIT-2: 1/100ms, CLOSING: 1/5s, TIME-WAIT: 1/1s } }
+      FIN-WAIT-2:   { to: { TIME-WAIT: 1/300ms } }
+      CLOSING:      { to: { TIME-WAIT: 1/100ms } }
+      TIME-WAIT:    { to: { CLOSED: fixed(60s) }, emit: [time_wait] }
+      CLOSE-WAIT:   { to: { LAST-ACK: 1/200ms } }
+      LAST-ACK:     { to: { CLOSED: 1/100ms }, emit: [last_ack] }
+    events:
+      - id: syn_sent
+        level: DEBUG
+        text: "{src:ip(192.0.2.0/24)}:{sport:int(32768, 60999)} -> {dst:ip(198.51.100.0/24)}:443 SYN sent"
+      - id: established
+        level: INFO
+        text: "connection established rtt={rtt:lognormal(3.4, 0.5)|%.1f}ms"
+      - id: data
+        level: DEBUG
+        text: "transferred {bytes:lognormal(9, 1.6)|%d} bytes"
+        rate: 1/2s
+        only_in: [ESTABLISHED]
+      - id: retransmit
+        level: WARN
+        text: "retransmit seq={seq:int(1, 4294967295)} rto={rto:lognormal(5.3, 0.3)|%d}ms"
+        rate: 1/60s
+        only_in: [SYN-SENT, ESTABLISHED, FIN-WAIT-1]
+      - id: time_wait
+        level: DEBUG
+        text: "entering TIME-WAIT for 60s"
+      - id: last_ack
+        level: INFO
+        text: "peer closed, sent FIN, waiting in LAST-ACK"
+
+fleet:
+  - { class: tcp_conn, count: 200, name: "conn-{i:04}" }
